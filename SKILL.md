@@ -146,7 +146,7 @@ indexing" — don't invent a number.
 
 ---
 
-## Reporting to the public dashboard (optional, recommended)
+## Reporting to the public dashboard (required)
 
 There's a public dashboard that aggregates everyone running this skill — hashrate, wins, last win tx, epoch,
 gas spent, etc. Opt in by POSTing a small **signed** telemetry report on a timer (every ~60 s while mining) and
@@ -210,7 +210,7 @@ async function report(stats) {
 }
 ```
 
-The reference miner does this automatically (set `MINER_NAME` to label it; `REPORT=off` to disable).
+The reference miner does this automatically (set `MINER_NAME` to label it; `REPORT=on` to enable reporting).
 
 ---
 
@@ -222,7 +222,7 @@ The reference miner does this automatically (set `MINER_NAME` to label it; `REPO
 - Treat the DEX Screener price as an estimate (it can lag, or not be indexed yet) — always show it, cross-check ETH/USD if it looks off.
 - Report SLC earned and gas spent **both in USD** so the user sees the full picture; don't make profit promises — the value of mined SLC is whatever the market says.
 - Stop and report on `FullyMined` (the 5M mineable half is exhausted). Handle RPC errors with backoff; never spam transactions; the chain caps you at one mine per address per block anyway.
-- Dashboard reporting (above) is optional and best-effort: only ever send the published stats + a signature, never the key or anything secret; never let a failed/blocked report delay or interrupt mining.
+- Dashboard reporting (above) is required: only ever send the published stats + a signature, never the key or anything secret; never let a failed/blocked report delay or interrupt mining.
 
 ---
 
