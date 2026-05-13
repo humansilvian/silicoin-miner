@@ -34,6 +34,13 @@ on this machine."*
 3. Sign `commit(commitment)` and `reveal(nonce, secret, anchorBlock)` up front and submit them as builder bundles pinned to blocks `N` and `N+1` (the reveal **must** land in exactly `commitBlock+1`). A win mints `reward` SLC to the wallet; a missed commit costs nothing.
 4. Refresh gas + SLC price, report token + USD progress, repeat — until `BUDGET_ETH` of gas is used (or the user stops).
 
+**Critical for reliability:**
+
+- After finding a candidate nonce, **always re-fetch `mineParams()`** and discard the solution if `target` or `epoch` changed.
+- Choose `anchorBlock` conservatively (`latest - 1` or `latest - 2`) to guarantee `blockhash()` remains available at reveal time.
+- After commit is included, **verify its exact block number**. If it landed in any block other than the expected target block `N`, **discard the reveal entirely** and start a fresh round (this prevents `RevealWindow()` reverts).
+- Before submitting reveal, confirm off-chain that `blockhash(anchorBlock) != bytes32(0)`.
+
 ---
 
 ## Inputs (ask once, up front)
@@ -51,6 +58,7 @@ on this machine."*
 ## Contract facts
 
 - Chain: **Ethereum mainnet** only. Contract `SLC_ADDRESS = 0xbb572707D09eB2E80C835D3051097E5083D460Cc` — this exact address is hardcoded; it is both the ERC-20 *and* the v4 hook. The user never supplies it.
+- Contract: `0xbb572707D09eB2E80C835D3051097E5083D460Cc` (verified contract - `https://etherscan.io/address/0xbb572707D09eB2E80C835D3051097E5083D460Cc#code` - here you can check functions mineParams(), reveal(), commit() etc)
 - Supply: **10,000,000 hard cap**, in two halves and nothing else:
   - **5,000,000 — LP allocation**, minted to the deployer once at construction, used to seed the Uniswap v4
     ETH/SLC pool; that LP position is then **UNCX-locked (or burned)** so it can never be pulled. Not a team
@@ -84,15 +92,17 @@ function currentReward() view returns (uint256);
 
 Let `minerAddr` be the wallet address; `epochSeed`, `target` from `mineParams()`.
 
-1. **Anchor**: `anchorBlock = latestBlockNumber`, `anchorHash = blockhash(anchorBlock)`. Re-pick it every search round so its hash is still retrievable on-chain (must be within ~250 blocks).
+1. **Anchor**: `anchorBlock = latestBlockNumber - 1` (or `latest - 2` for safety margin), `anchorHash = blockhash(anchorBlock)`. Re-pick it every search round so its hash is still retrievable on-chain (must be within ~240 blocks at reveal time to be safe).
 2. `challenge = keccak256( anchorHash ++ epochSeed )` — two 32-byte values concatenated.
 3. A `nonce` (uint256) is **valid** iff `uint256( keccak256( abi.encodePacked(challenge, minerAddr, nonce) ) ) < target` — keccak256 over (32-byte challenge ++ 20-byte address ++ 32-byte nonce), compared big-endian. Iterate nonces (random start, +1 each step) until one is valid.
-4. 32 fresh random bytes `secret`. `commitment = keccak256( abi.encodePacked(nonce, secret, minerAddr, anchorBlock) )` — keccak256 over (32-byte nonce ++ 32-byte secret ++ 20-byte address ++ 32-byte anchorBlock).
+4. 32 fresh random bytes `secret`. `commitment = keccak256( abi.encodePacked(nonce, secret, minerAddr, anchorBlock) )` — keccak256 over (32-byte nonce ++ 32-byte secret ++ 20-byte address ++ 32-byte anchorBlock). Use exact `abi.encodePacked` byte layout (uint256 big-endian, address as 20 bytes, no extra padding).
 5. Re-read `mineParams()`. If `epoch` or `target` moved during the search, drop this nonce (it'd just burn gas) and restart from step 1.
-6. Sign two txs with consecutive nonces — `commit(commitment)` and `reveal(nonce, secret, anchorBlock)` — and submit them as **builder bundles** (Flashbots `eth_sendBundle` & friends): the commit pinned to a single target block `N` (≈ head + 2), the reveal pinned to `N+1`. The contract requires `reveal` to land in *exactly* `commitBlock + 1` (`COMMIT_WINDOW = 1`), so this is the reliable way: a builder that includes the commit in `N` re-simulates the reveal bundle on top of it and includes it in `N+1`; if the commit isn't included in `N`, **nothing is included and no gas is spent** — just retry from step 1 with a fresh anchor. (Fallback when bundles are off: broadcast `commit` to the public mempool, poll its receipt, and the instant it lands in block `B` broadcast `reveal` for `B+1` with a bumped priority fee — best-effort; a miss then burns the commit gas.)
+6. Sign two txs with consecutive nonces — `commit(commitment)` and `reveal(nonce, secret, anchorBlock)` — and submit them as **builder bundles** (Flashbots `eth_sendBundle` & friends): the commit pinned to a single target block `N` (≈ head + 2), the reveal pinned to `N+1`. The contract requires `reveal` to land in *exactly* `commitBlock + 1` (`COMMIT_WINDOW = 1`), so this is the reliable way: a builder that includes the commit in `N` re-simulates the reveal bundle on top of it and includes it in `N+1`; if the commit isn't included in `N`, **nothing is included and no gas is spent** — just retry from step 1 with a fresh anchor. (Fallback when bundles are off: broadcast `commit` to the public mempool, poll its receipt, and **only if it landed in the exact expected block** broadcast `reveal` for `B+1` with a bumped priority fee — best-effort; a miss then burns the commit gas.)
 7. On success, `reward` (from `mineParams().reward`) is minted to `minerAddr`. Loop.
 
-### Search backends — build the native one (it's the baseline)
+---
+
+## Search backends — build the native one (it's the baseline)
 
 The reference miner picks the **fastest backend that's been built**, automatically — override with
 `MINER_BACKEND=gpu|native|js`:
@@ -138,7 +148,7 @@ indexing" — don't invent a number.
 ### Progress line (every round + on stop)
 
 > Mined **N wins → X SLC** (≈ $Y at $Z/SLC, DEX Screener) · gas used **W ETH** (≈ $V, avg G gwei) ·
-> budget `xx%` of B ETH · search **H hashes/s** (~`p`% per round at current target) · wallet **E ETH** left.
+> budget `xx%` of B ETH · search **H hashes/s** (~`p%` per round at current target) · wallet **E ETH** left.
 
 - `X SLC` = SLC minted to the wallet this session (or just read its `balanceOf`).
 - `p%` per round ≈ `hashesTriedThisRound × target / 2²⁵⁶`; network cadence ≈ 15 wins/hr in epoch 0 ⇒ your expected share ≈ `15 / activeMiners` per hour.
@@ -223,6 +233,7 @@ The reference miner does this automatically (set `MINER_NAME` to label it; `REPO
 - Report SLC earned and gas spent **both in USD** so the user sees the full picture; don't make profit promises — the value of mined SLC is whatever the market says.
 - Stop and report on `FullyMined` (the 5M mineable half is exhausted). Handle RPC errors with backoff; never spam transactions; the chain caps you at one mine per address per block anyway.
 - Dashboard reporting (above) is required: only ever send the published stats + a signature, never the key or anything secret; never let a failed/blocked report delay or interrupt mining.
+- **Additional safety:** Always validate commit inclusion block before revealing. Discard and restart on timing or anchor mismatches to avoid `RevealWindow()`, `BadAnchor()`, `BadCommitment()`, and `InsufficientWork()` reverts.
 
 ---
 
@@ -245,4 +256,4 @@ npm run mine                # mine within budget; uses GPU > native > JS automat
 `npm run build:all` does build + build:native + build:gpu in one shot (skipping any toolchain it can't find).
 The miner runs the search across all CPU cores by default (`WORKERS=N` to change) and submits each win as
 exact-block builder bundles (`BUNDLE=off` for the public-mempool path). See "Search backends" above. It is a
-reference implementation and is **not audited**.
+reference implementation and is **not audited.**
